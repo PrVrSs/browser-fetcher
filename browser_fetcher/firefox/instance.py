@@ -1,14 +1,22 @@
 import logging
 import platform
-from enum import Enum, IntFlag, auto
-from typing import Callable, ClassVar, Optional
-from functools import wraps
+from enum import Enum, Flag
+from operator import itemgetter
+from pathlib import Path
+from shutil import unpack_archive
+from typing import List, Optional
 
-from browser_fetcher.downloader import Provider
-from browser_fetcher.firefox.model import Index
+from more_itertools import last
+
+from ..provider import Provider
+
+from .model import Artifact, Index, validate
 
 
 logger = logging.getLogger(__name__)
+
+QUEUE = 'queue'
+INDEX = 'index'
 
 
 class Product(Enum):
@@ -20,43 +28,37 @@ class Branch(Enum):
     pass
 
 
-class Build(IntFlag):
+class BuildValue(int):
 
-    ccov = COVERAGE = C = auto()
-    fuzzing = FUZZING = F = auto()
-    asan = ASAN = A = auto()
-    tsan = TSAN = T = auto()
-    valgrind = VALGRIND = V = auto()
-    debug = DEBUG = D = auto()
+    def __new__(cls, value, name):
+        self = super().__new__(cls, value)
+        self.__flag_name__ = name
+        return self
+
+
+class Build(Flag):
+
+    COVERAGE = C = BuildValue(1, 'ccov')
+    FUZZING = F = BuildValue(2, 'fuzzing')
+    ASAN = A = BuildValue(4, 'asan')
+    TSAN = T = BuildValue(8, 'tsan')
+    VALGRIND = BuildValue(16, 'valgrind')
+    DEBUG = D = BuildValue(32, 'debug')
+    OPTIMIZED = O = BuildValue(64, 'opt')
 
     def _members(self, value: int):
         for member in self.__class__:
             if value & member.value:
                 value &= ~member.value
-                yield f'-{member.name}'
+
+                yield member.value.__flag_name__
 
     def __repr__(self):
-        return ''.join(self._members(self.value))
+        return '-'.join(self._members(self.value))
 
     __str__ = object.__str__
 
 # globals().update(Build.__members__)
-
-
-class PureFirefox:
-    pass
-
-
-class WindowsFirefox(PureFirefox):
-    pass
-
-
-class DarwinFirefox(PureFirefox):
-    pass
-
-
-class LinuxFirefox(PureFirefox):
-    pass
 
 
 class Platform:
@@ -92,64 +94,30 @@ class Platform:
         self.system = self.SUPPORTED[system][machine]
 
 
-def get_validation_cls(func):
-    """TODO: fix it"""
-    return func.__annotations__['return'].__args__[0]
-
-
-def validate(func):
-
-    @wraps(func)
-    def wrapper(*args, **kwargs):
-        if result := func(*args, **kwargs):
-            return get_validation_cls(func)(**result.json())
-
-    return wrapper
+INSTANCE: str = 'https://firefox-ci-tc.services.mozilla.com/api'
 
 
 class API:
-
-    instance: ClassVar[Callable[[str, str], str]] = (
-        'https://firefox-ci-tc.services.mozilla.com/api/{action}/v1/task/{path}').format
-
-    task_path: ClassVar[Callable[[str, str, str, str], str]] = (
-        '{namespace}.{product}.{system}{flags}').format
-
-    artifacts: ClassVar[Callable[[str], str]] = '{task_id}/artifacts'.format
-
-    artifact: ClassVar[Callable[[str, str], str]] = '{task_id}/artifacts/{name}'.format
 
     def __init__(self, provider: Provider):
         self._provider = provider
 
     @validate
     def task(self, namespace: str, product: str, system: str, flags: str) -> Optional[Index]:
-        return self._provider.do_request(
-            self.instance(
-                action='index',
-                path=self.task_path(
-                    namespace=namespace,
-                    product=product,
-                    system=system,
-                    flags=flags,
-                )
-            )
-        )
+        return self._provider.do_request(  # type: ignore
+            f'{INSTANCE}/{INDEX}/v1/task/{namespace}.{product}.{system}-{flags}')
 
-    @validate
-    def queue(self, task_id: str):
-        return self._provider.do_request(self.instance(action='queue', path=task_id))
-
-    @validate
-    def artifacts(self, task_id: str):
-        return self._provider.do_request(
-            self.instance(action='queue', path=self.artifacts(task_id=task_id)))
+    @validate(key=itemgetter('artifacts'))
+    def artifacts(self, task_id: str) -> Optional[List[Artifact]]:
+        return self._provider.do_request(  # type: ignore
+            f'{INSTANCE}/{QUEUE}/v1/task/{task_id}/artifacts')
 
     def download(self, task_id: str, name: str, output: str) -> bool:
         return self._provider.download(
-            url=self.instance(action='queue', path=self.artifact(task_id=task_id, name=name)),
-            output=output,
-        )
+            url=f'{INSTANCE}/{QUEUE}/v1/task/{task_id}/artifacts/{name}', output=output)
+
+    # def queue(self, task_id: str):
+    #     return self._provider.do_request(f'{INSTANCE}/{QUEUE}/v1/task/{task_id}')
 
 
 def create_api(provider: Provider) -> API:
@@ -165,18 +133,25 @@ class Firefox:
         return getattr(self._api, item)
 
 
-core = Firefox()
+def download(flags: Build, product: str, branch: str, build: str, output: str) -> None:
+    firefox = Firefox()
 
+    task = firefox.task(
+        namespace=f'gecko.v2.{branch}.{build}',
+        product=product,
+        system=Platform().system,
+        flags=str(flags)
+    )
 
-product = 'firefox'
-branch = 'mozilla-central'
-namespace = "gecko.v2." + branch + ".latest"
+    if task is None:
+        return
 
-t = core.task(
-    namespace=namespace,
-    product=product,
-    system=Platform().system,
-    flags=str(Build.ASAN | Build.DEBUG)
-)
+    artifacts = firefox.artifacts(task_id=task.task_id)
+    tar = [item.name for item in artifacts if item.content_type == 'application/x-bzip2'][0]
 
-print(t)
+    file_name = last(tar.split('/'))
+    firefox.download(task_id=task.task_id, name=tar, output=str(Path(output) / file_name))
+
+    logger.info('Unpack archive: %s', file_name)
+    unpack_archive(str(Path(output) / file_name), extract_dir=str(Path(output)))
+    logger.info('Successfully unpacked')

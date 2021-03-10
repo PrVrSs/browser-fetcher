@@ -3,6 +3,7 @@ from collections import ChainMap
 from typing import Any, ClassVar, Dict, Iterable, Optional
 
 import requests
+from more_itertools import last
 from requests import RequestException, Response
 from tqdm import tqdm
 
@@ -20,13 +21,15 @@ class Provider:
     def __init__(self):
         self._session = requests.session()
 
-    def do_request(self, url: str, **kwargs) -> Optional[Response]:
+    def do_request(self, url: str, **kwargs: Any) -> Optional[Response]:
+        logger.debug('URL: %s', url)
+
         try:
             response = self._session.get(url, **ChainMap(kwargs, self._default_params))
             response.raise_for_status()
         except RequestException as exc:
-            logger.exception(exc)
-            return
+            logger.error(str(exc))
+            return None
 
         return response
 
@@ -34,7 +37,7 @@ class Provider:
         if response := self.do_request(url, stream=True):
             return save(
                 content=response.iter_content(chunk_size=1024 * 1024),
-                desc=url,
+                desc=last(url.split('/')),
                 total=int(response.headers.get('content-length', 0)),
                 output=output,
             )
@@ -61,6 +64,6 @@ def save(content: Iterable[bytes], desc: str, total: int, output: str) -> bool:
                 file.write(chunk)
 
         return True
-    except Exception as exc:
-        logger.exception(exc)
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.error(str(exc))
         return False
