@@ -8,6 +8,7 @@ from typing import List, Optional
 
 from more_itertools import last
 
+from ..error import handle_error
 from ..provider import Provider
 
 from .model import Artifact, Index, validate
@@ -102,17 +103,20 @@ class API:
     def __init__(self, provider: Provider):
         self._provider = provider
 
+    @handle_error
     @validate
     def task(self, namespace: str, product: str, system: str, flags: str) -> Optional[Index]:
-        return self._provider.do_request(  # type: ignore
+        return self._provider.do_request(
             f'{INSTANCE}/{INDEX}/v1/task/{namespace}.{product}.{system}-{flags}')
 
+    @handle_error
     @validate(key=itemgetter('artifacts'))
     def artifacts(self, task_id: str) -> Optional[List[Artifact]]:
-        return self._provider.do_request(  # type: ignore
+        return self._provider.do_request(
             f'{INSTANCE}/{QUEUE}/v1/task/{task_id}/artifacts')
 
-    def download(self, task_id: str, name: str, output: str) -> bool:
+    @handle_error
+    def download(self, task_id: str, name: str, output: str) -> None:
         return self._provider.download(
             url=f'{INSTANCE}/{QUEUE}/v1/task/{task_id}/artifacts/{name}', output=output)
 

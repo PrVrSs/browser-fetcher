@@ -1,9 +1,10 @@
 from datetime import datetime
 from functools import update_wrapper
-from typing import Any, Dict
+from typing import Any, Callable, Dict, Union
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
+from ..error import ValidateError
 from ..utils import to_camel_case
 
 
@@ -37,14 +38,15 @@ def get_validation_cls(func):
 _validate_null = object()
 
 
-def validate(__func__=_validate_null, key=None):
-    if __func__ is not _validate_null:
-        return update_wrapper(_validate_wrapper(__func__), __func__)
+def validate(__func__: Union[object, Callable[[Any], Any]] = _validate_null, key: Any = None):
 
     def decorating_function(user_function):
         return update_wrapper(_validate_wrapper(user_function, key), user_function)
 
-    return decorating_function
+    if __func__ is _validate_null:
+        return decorating_function
+
+    return update_wrapper(_validate_wrapper(__func__), __func__)
 
 
 def _validate_wrapper(user_function, key=lambda _: _):
@@ -52,12 +54,19 @@ def _validate_wrapper(user_function, key=lambda _: _):
     validation_cls = get_validation_cls(user_function)
 
     def wrapper(*args, **kwargs):
-        if result := user_function(*args, **kwargs):
-            prepared = key(result.json())
+        result = user_function(*args, **kwargs)
+        prepared = key(result.json())
 
-            if getattr(validation_cls, '_name', '') == 'List':
-                return [validation_cls.__args__[0](**item) for item in prepared]
+        if getattr(validation_cls, '_name', '') == 'List':
+            return [_validate(validation_cls.__args__[0], item) for item in prepared]
 
-            return validation_cls(**prepared)
+        return _validate(validation_cls, prepared)
 
     return wrapper
+
+
+def _validate(model, data):
+    try:
+        return model(**data)
+    except ValidationError as exc:
+        raise ValidateError(exc)
